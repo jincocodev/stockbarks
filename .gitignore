@@ -1,0 +1,28 @@
+# 機密資料絕對不能進 repo
+.env
+*.env
+!*.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Runtime 資料
+stockwatch_state.json
+stockwatch_ticks.json
+stockwatch_data.json
+*.log
+*.log.*
+
+# 系統檔
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+.idea/
+.vscode/
+
+# Build
+dist/
+build/
+*.tgz

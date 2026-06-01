@@ -152,15 +152,19 @@ def main():
                 return 0
             df.ts = pd.to_datetime(df.ts)
             arr = ticks.setdefault(code, [])
-            existing_times = {t["t"] for t in arr}
+            # 用「時:分」去重，而不是完整秒數：即時 tick 是 HH:MM:SS、
+            # 回補 K 棒是 HH:MM:00，若比完整字串永遠對不上，會讓每個已有即時
+            # 資料的分鐘被重複加一筆，點數翻倍超過 MAX_TICKS，開盤段就被截掉。
+            existing_minutes = {t["t"][:5] for t in arr}
             added = 0
             cum_v = 0
             for _, row in df.iterrows():
                 t = row["ts"].strftime("%H:%M:%S")
                 cum_v += int(row["Volume"])
-                if t in existing_times:
+                if t[:5] in existing_minutes:
                     continue
                 arr.append({"t": t, "p": float(row["Close"]), "v": cum_v})
+                existing_minutes.add(t[:5])
                 added += 1
             arr.sort(key=lambda x: x["t"])
             if len(arr) > MAX_TICKS:

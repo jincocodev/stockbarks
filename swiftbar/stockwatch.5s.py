@@ -25,37 +25,38 @@ FLAT = "#868E96"
 
 # ---------------- PNG sparkline ----------------
 
-def png_sparkline(prices, prev_close, width=120, height=22, is_dark=False,
+def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
                   times=None, volumes=None):
-    """畫真折線 PNG（三竹/籌碼K線分時圖風格）。
-    - 上 70%: 紅/綠折線 + 半透明面積填充 (vs 昨收) + 白色均價線 + 橘虛線=昨收
-    - 下 30%: 藍色成交量柱（每分鐘 delta）
+    """畫真折線 PNG（三竹/籌碼K線分時圖風格，抗鋸齒版）。
+    - 高倍 (SCALE) 繪製後 LANCZOS 縮回 -> 線條平滑無鋸齒
+    - 價格折線分段染色（紅=高於昨收 / 綠=低於），漸層面積填充
+    - 成交量：壓矮、半透明，鋪在價格圖「背景」（不另外吃高度）
+    - 白色 VWAP 均價線、淡灰平盤虛線、現價最後一點帶光暈
     - x 軸固定 09:00-13:30
     """
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageChops
     except ImportError:
         return None
     if not prices or len(prices) < 2:
         return None
 
-    SCALE = 2
+    SCALE = 4          # 超取樣倍率，最後縮回 -> 抗鋸齒
+    OUT_SCALE = 2      # 最終 PNG 2x（retina）
+    VOL_CAP = 0.45     # 量柱最高佔繪圖區比例（壓矮當背景）
+    VOL_ALPHA = 38     # 量柱透明度（淡）
+
     W, H = width * SCALE, height * SCALE
     PAD_X = 1 * SCALE
-    PAD_Y = 1 * SCALE
-
-    VOL_RATIO = 0.28
-    GAP = 1 * SCALE
-    PRICE_AREA_H = int((H - 2 * PAD_Y - GAP) * (1 - VOL_RATIO))
-    VOL_AREA_H = (H - 2 * PAD_Y - GAP) - PRICE_AREA_H
-    PRICE_TOP = PAD_Y
-    PRICE_BOT = PAD_Y + PRICE_AREA_H
-    VOL_BOT = H - PAD_Y
+    PAD_Y = 2 * SCALE
+    AREA_TOP = PAD_Y
+    AREA_BOT = H - PAD_Y
+    AREA_H = AREA_BOT - AREA_TOP
 
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    series = list(prices) + [prev_close]  # 包含 ref 確保虛線在畫面內
+    series = list(prices) + [prev_close]
     data_lo, data_hi = min(series), max(series)
     span = max(data_hi - data_lo, prev_close * 0.005)
     pad = span * 0.10
@@ -74,61 +75,90 @@ def png_sparkline(prices, prev_close, width=120, height=22, is_dark=False,
         return PAD_X + int(minute / MARKET_TOTAL_MIN * (W - 2 * PAD_X))
 
     def y_of_price(p):
-        return PRICE_TOP + int((hi - p) / rng * PRICE_AREA_H)
+        return AREA_TOP + int((hi - p) / rng * AREA_H)
 
     cur = prices[-1]
-    # 分段配色：高於昨收紅、低於昨收綠
-    RED_LINE = (255, 80, 80, 255)
-    RED_FILL = (255, 60, 60, 60)
-    GRN_LINE = (80, 220, 100, 255)
-    GRN_FILL = (60, 200, 90, 60)
-    # 最後一點顏色（用於圓點）
-    line_color = RED_LINE if cur >= prev_close else GRN_LINE
-
+    RED_LINE = (255, 75, 75)
+    GRN_LINE = (60, 205, 95)
+    line_rgb = RED_LINE if cur >= prev_close else GRN_LINE
     baseline_y = y_of_price(prev_close)
 
-    # 計算各點座標（用時間軸對齊）
-    pts = []
-    if times and len(times) == len(prices):
-        for t, p in zip(times, prices):
-            mins = t_to_min(t)
-            if mins < 0:
+    have_tv = bool(times and volumes and len(times) == len(prices)
+                   and len(volumes) == len(prices))
+
+    # 按分鐘聚合成交量 delta（第一筆設 0 避免累積起始值爆衝）
+    minute_vol = {}
+    minute_pv = {}
+    if have_tv:
+        deltas_v = [0] + [max(0, volumes[i] - volumes[i - 1])
+                          for i in range(1, len(volumes))]
+        for t, p, dv in zip(times, prices, deltas_v):
+            m = t_to_min(t)
+            if m < 0 or m > MARKET_TOTAL_MIN:
                 continue
-            if mins > MARKET_TOTAL_MIN:
-                mins = MARKET_TOTAL_MIN
-            pts.append((x_of_t(mins), y_of_price(p), p))
+            mb = int(m)
+            minute_vol[mb] = minute_vol.get(mb, 0) + dv
+            minute_pv[mb] = minute_pv.get(mb, 0) + p * dv
+
+    # === 1) 成交量背景柱（壓矮、半透明，畫在最底層）===
+    if minute_vol:
+        vals = sorted(minute_vol.values())
+        idx = max(0, int(len(vals) * 0.95) - 1)
+        cap_v = max(vals[idx], 1)
+        bar_w = max(1, int((W - 2 * PAD_X) / MARKET_TOTAL_MIN))
+        vlayer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        vd = ImageDraw.Draw(vlayer)
+        for mb, dv in minute_vol.items():
+            if dv <= 0:
+                continue
+            bar_h = int(min(1.0, dv / cap_v) * AREA_H * VOL_CAP)
+            x = x_of_t(mb)
+            vd.rectangle([x - bar_w // 2, AREA_BOT - bar_h,
+                          x + (bar_w - bar_w // 2), AREA_BOT],
+                         fill=(95, 150, 235, VOL_ALPHA))
+        img.alpha_composite(vlayer)
+        draw = ImageDraw.Draw(img)
+
+    # 各點座標（時間軸對齊；無 times 則均分）
+    pts = []
+    if have_tv or (times and len(times) == len(prices)):
+        for t, p in zip(times, prices):
+            m = t_to_min(t)
+            if m < 0:
+                continue
+            if m > MARKET_TOTAL_MIN:
+                m = MARKET_TOTAL_MIN
+            pts.append((x_of_t(m), y_of_price(p), p))
     else:
         n = len(prices)
         for i, p in enumerate(prices):
             x = PAD_X + int(i * (W - 2 * PAD_X) / max(n - 1, 1))
             pts.append((x, y_of_price(p), p))
-
     if len(pts) < 2:
         return None
 
-    # === 分段填充 + 分段折線（昨收為分界） ===
-    # 在每對相鄰點之間如果跨過 baseline，插入交點
-    def interp_cross(p1, p2, baseline_price):
-        x1, y1, v1 = p1
-        x2, y2, v2 = p2
-        # 線性插值 x：v1 + t*(v2-v1) = baseline -> t
+    # 切成連續同色段（昨收為界），跨界插入交點
+    def interp_cross(p1, p2):
+        x1, _, v1 = p1
+        x2, _, v2 = p2
         if v2 == v1:
             return None
-        t = (baseline_price - v1) / (v2 - v1)
+        t = (prev_close - v1) / (v2 - v1)
         if t <= 0 or t >= 1:
             return None
-        return (x1 + t * (x2 - x1), baseline_y, baseline_price)
+        return (x1 + t * (x2 - x1), baseline_y, prev_close)
 
-    # 切成連續同色段
-    segments = []  # [(side, [pts...])]  side: 'up' / 'down'
     def side_of(v):
-        if v > prev_close: return 'up'
-        if v < prev_close: return 'down'
-        return None  # 剛好踩在線上，視為延續
+        if v > prev_close:
+            return 'up'
+        if v < prev_close:
+            return 'down'
+        return None
 
+    segments = []
     cur_seg = []
     cur_side = None
-    for i, pt in enumerate(pts):
+    for pt in pts:
         s = side_of(pt[2])
         if cur_side is None:
             cur_side = s if s else 'up'
@@ -137,8 +167,7 @@ def png_sparkline(prices, prev_close, width=120, height=22, is_dark=False,
         if s is None or s == cur_side:
             cur_seg.append(pt)
         else:
-            # 跨界：插入交點，封一段、開新段
-            cross = interp_cross(cur_seg[-1], pt, prev_close)
+            cross = interp_cross(cur_seg[-1], pt)
             if cross:
                 cur_seg.append(cross)
                 segments.append((cur_side, cur_seg))
@@ -150,90 +179,78 @@ def png_sparkline(prices, prev_close, width=120, height=22, is_dark=False,
     if cur_seg:
         segments.append((cur_side, cur_seg))
 
-    # 畫填充
+    # === 2) 漸層面積填充（靠線端深、靠平盤線淡出）===
+    A_MAX = 150
     for side, seg in segments:
         if len(seg) < 2:
             continue
-        fill = RED_FILL if side == 'up' else GRN_FILL
-        poly = [(seg[0][0], baseline_y)]
-        poly += [(x, y) for x, y, _ in seg]
-        poly += [(seg[-1][0], baseline_y)]
-        draw.polygon(poly, fill=fill)
+        col = RED_LINE if side == 'up' else GRN_LINE
+        ys = [y for _, y, _ in seg]
+        top = min(min(ys), baseline_y)
+        bot = max(max(ys), baseline_y)
+        if bot <= top:
+            continue
+        far = max(1, abs((min(ys) if side == 'up' else max(ys)) - baseline_y))
+        h = bot - top
+        # 1px 寬的垂直漸層，再橫向拉寬（避免逐像素 Python 迴圈）
+        col_grad = Image.new("RGBA", (1, h), (0, 0, 0, 0))
+        cp = col_grad.load()
+        for yy in range(h):
+            a = int(max(0, min(A_MAX, A_MAX * abs(top + yy - baseline_y) / far)))
+            cp[0, yy] = (col[0], col[1], col[2], a)
+        grad = col_grad.resize((W, h))
+        # 多邊形遮罩 × 漸層 alpha
+        mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(mask).polygon(
+            [(seg[0][0], baseline_y)] + [(x, y) for x, y, _ in seg]
+            + [(seg[-1][0], baseline_y)], fill=255)
+        region = mask.crop((0, top, W, bot))
+        grad.putalpha(ImageChops.multiply(grad.split()[3], region))
+        img.alpha_composite(grad, (0, top))
+    draw = ImageDraw.Draw(img)
 
     # 平盤線（淡灰虛線）
-    baseline_color = (170, 170, 170, 180)
-    dash_len = 3 * SCALE
-    gap_len = 3 * SCALE
+    dash = 3 * SCALE
     x = 0
     while x < W:
-        draw.line([(x, baseline_y), (min(x + dash_len, W), baseline_y)],
-                  fill=baseline_color, width=1)
-        x += dash_len + gap_len
+        draw.line([(x, baseline_y), (min(x + dash, W), baseline_y)],
+                  fill=(165, 165, 165, 170), width=max(1, SCALE // 2))
+        x += dash * 2
 
-    # === 按分鐘聚合成交量（delta），第一筆設 0 避免累積起始值爆衝 ===
-    # bucket[minute_int] = (sum_dv, avg_price_weighted)
-    minute_vol = {}   # minute -> dv
-    minute_pv = {}    # minute -> sum(p*dv)
-    if volumes and times and len(volumes) == len(prices):
-        deltas_v = [0] + [max(0, volumes[i] - volumes[i - 1])
-                          for i in range(1, len(volumes))]
-        for t, p, dv in zip(times, prices, deltas_v):
-            mins = t_to_min(t)
-            if mins < 0 or mins > MARKET_TOTAL_MIN:
-                continue
-            mb = int(mins)
-            minute_vol[mb] = minute_vol.get(mb, 0) + dv
-            minute_pv[mb] = minute_pv.get(mb, 0) + p * dv
-
-    # 均價線 VWAP（白色細線，按分鐘累積）
+    # VWAP 均價線（白色細線，按分鐘累積）
     if minute_vol:
-        cum_pv = 0
-        cum_v = 0
+        cum_pv = cum_v = 0
         vwap_pts = []
         for mb in sorted(minute_vol.keys()):
             cum_pv += minute_pv[mb]
             cum_v += minute_vol[mb]
             if cum_v > 0:
-                vwap = cum_pv / cum_v
-                vwap_pts.append((x_of_t(mb), y_of_price(vwap)))
+                vwap_pts.append((x_of_t(mb), y_of_price(cum_pv / cum_v)))
         if len(vwap_pts) >= 2:
-            draw.line(vwap_pts, fill=(255, 255, 255, 220), width=1, joint="curve")
+            draw.line(vwap_pts, fill=(255, 255, 255, 225),
+                      width=max(1, SCALE // 2), joint="curve")
 
-    # 價格折線（分段染色）
+    # 價格折線（分段染色，粗線；抗鋸齒靠最後縮放）
     for side, seg in segments:
         if len(seg) < 2:
             continue
-        color = RED_LINE if side == 'up' else GRN_LINE
-        draw.line([(x, y) for x, y, _ in seg], fill=color, width=1 * SCALE, joint="curve")
+        color = (RED_LINE if side == 'up' else GRN_LINE) + (255,)
+        draw.line([(x, y) for x, y, _ in seg], fill=color,
+                  width=int(1.4 * SCALE), joint="curve")
 
-    # 最後一點圓點
+    # === 3) 現價最後一點：光暈 + 實心圓點 ===
     lx, ly = pts[-1][0], pts[-1][1]
-    r = 1 * SCALE + 1
-    draw.ellipse([lx - r, ly - r, lx + r, ly + r], fill=line_color)
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for rr, aa in [(5 * SCALE, 28), (3.2 * SCALE, 52), (2 * SCALE, 85)]:
+        gd.ellipse([lx - rr, ly - rr, lx + rr, ly + rr], fill=line_rgb + (aa,))
+    img.alpha_composite(glow)
+    draw = ImageDraw.Draw(img)
+    r = int(1.3 * SCALE)
+    draw.ellipse([lx - r, ly - r, lx + r, ly + r], fill=line_rgb + (255,))
 
-    # 成交量柱（按分鐘聚合，藍色細柱）
-    if minute_vol:
-        # 用 P95 當基準避開開盤集合競價超大量，超過上限的柱頂滿就好
-        vals = sorted(minute_vol.values())
-        if vals:
-            idx = max(0, int(len(vals) * 0.95) - 1)
-            cap_v = max(vals[idx], 1)
-        else:
-            cap_v = 1
-        bar_color = (90, 170, 255, 230)
-        bar_w = max(1, int((W - 2 * PAD_X) / MARKET_TOTAL_MIN))
-        for mb, dv in minute_vol.items():
-            if dv <= 0:
-                continue
-            ratio = min(1.0, dv / cap_v)
-            bar_h = max(1, int(ratio * VOL_AREA_H))
-            x = x_of_t(mb)
-            draw.rectangle(
-                [x - bar_w // 2, VOL_BOT - bar_h,
-                 x + (bar_w - bar_w // 2), VOL_BOT],
-                fill=bar_color,
-            )
-
+    # 縮回顯示尺寸 -> 抗鋸齒
+    img = img.resize((width * OUT_SCALE, height * OUT_SCALE), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")

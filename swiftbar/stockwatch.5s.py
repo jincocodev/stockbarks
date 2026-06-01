@@ -43,8 +43,8 @@ def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
 
     SCALE = 4          # 超取樣倍率，最後縮回 -> 抗鋸齒
     OUT_SCALE = 2      # 最終 PNG 2x（retina）
-    VOL_CAP = 0.55     # 量柱最高佔繪圖區比例（壓矮當背景）
-    VOL_ALPHA = 85     # 量柱透明度
+    VOL_CAP = 0.60     # 量柱最高佔繪圖區比例（壓矮當背景）
+    VOL_ALPHA = 130    # 量柱透明度
 
     W, H = width * SCALE, height * SCALE
     PAD_X = 1 * SCALE
@@ -105,17 +105,17 @@ def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
         vals = sorted(minute_vol.values())
         idx = max(0, int(len(vals) * 0.95) - 1)
         cap_v = max(vals[idx], 1)
-        bar_w = max(1, int((W - 2 * PAD_X) / MARKET_TOTAL_MIN))
         vlayer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         vd = ImageDraw.Draw(vlayer)
         for mb, dv in minute_vol.items():
             if dv <= 0:
                 continue
             bar_h = int(min(1.0, dv / cap_v) * AREA_H * VOL_CAP)
-            x = x_of_t(mb)
-            vd.rectangle([x - bar_w // 2, AREA_BOT - bar_h,
-                          x + (bar_w - bar_w // 2), AREA_BOT],
-                         fill=(95, 150, 235, VOL_ALPHA))
+            # 填滿整個分鐘格、連續不留縫，縮圖後才是一塊實心量能而非被平均掉的細點
+            x0 = x_of_t(mb)
+            x1 = max(x0 + 1, x_of_t(mb + 1))
+            vd.rectangle([x0, AREA_BOT - bar_h, x1, AREA_BOT],
+                         fill=(90, 150, 240, VOL_ALPHA))
         img.alpha_composite(vlayer)
         draw = ImageDraw.Draw(img)
 

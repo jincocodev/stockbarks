@@ -43,8 +43,8 @@ def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
 
     SCALE = 4          # 超取樣倍率，最後縮回 -> 抗鋸齒
     OUT_SCALE = 2      # 最終 PNG 2x（retina）
-    VOL_CAP = 0.45     # 量柱最高佔繪圖區比例（壓矮當背景）
-    VOL_ALPHA = 38     # 量柱透明度（淡）
+    VOL_CAP = 0.55     # 量柱最高佔繪圖區比例（壓矮當背景）
+    VOL_ALPHA = 85     # 量柱透明度
 
     W, H = width * SCALE, height * SCALE
     PAD_X = 1 * SCALE
@@ -236,7 +236,7 @@ def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
             continue
         color = (RED_LINE if side == 'up' else GRN_LINE) + (255,)
         draw.line([(x, y) for x, y, _ in seg], fill=color,
-                  width=int(1.4 * SCALE), joint="curve")
+                  width=int(1.0 * SCALE), joint="curve")
 
     # === 3) 現價最後一點：光暈 + 實心圓點 ===
     lx, ly = pts[-1][0], pts[-1][1]
@@ -246,7 +246,7 @@ def png_sparkline(prices, prev_close, width=100, height=20, is_dark=False,
         gd.ellipse([lx - rr, ly - rr, lx + rr, ly + rr], fill=line_rgb + (aa,))
     img.alpha_composite(glow)
     draw = ImageDraw.Draw(img)
-    r = int(1.3 * SCALE)
+    r = int(1.1 * SCALE)
     draw.ellipse([lx - r, ly - r, lx + r, ly + r], fill=line_rgb + (255,))
 
     # 縮回顯示尺寸 -> 抗鋸齒

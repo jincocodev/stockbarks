@@ -113,20 +113,34 @@ def main():
     def relogin(reason):
         # session 壞掉或跨日時重建連線。重登入會重新載入 contracts，
         # 順帶刷新昨收 / 漲跌停（跨日後這些值才不會是舊的）。
+        # 登入失敗（通常就是網路斷——也正是觸發 relogin 的原因）必須吞住，
+        # 否則例外會逃出主迴圈讓 daemon 崩潰，launchd 又把它重啟成崩潰迴圈。
+        # 吞住後主迴圈下一圈會自然再重試。
         LOG.warning("re-login (%s)", reason)
         try:
             api.logout()
         except Exception:
             pass
         contracts_cache.clear()
-        do_login()
+        try:
+            do_login()
+            return True
+        except Exception as e:
+            LOG.error("re-login failed, will retry: %s", e)
+            return False
 
     do_login()
 
     def get_contract(code):
         if code in contracts_cache:
             return contracts_cache[code]
-        c = api.Contracts.Stocks.get(code)
+        try:
+            c = api.Contracts.Stocks.get(code)
+        except Exception as e:
+            # session 剛掛掉時解析 contract 可能拋例外——吞掉當作查不到，
+            # 不要讓它逃出主迴圈崩潰；session 復原後自然就查得到了。
+            LOG.error("get_contract %s failed: %s", code, e)
+            return None
         if c is None:
             # 嘗試指數/期貨等先不支援
             return None
@@ -209,6 +223,7 @@ def main():
                 today_key = tk
                 relogin("new trading day")  # 刷新昨收 / 漲跌停
                 backfilled_codes.clear()    # 新的一天重新回補分時
+                warned_unknown.clear()      # 新的一天讓查不到的代號可再警告一次
 
             watchlist = state.get("watchlist", [])
             if not watchlist:
@@ -252,6 +267,15 @@ def main():
                 LOG.info("filled names: %s", names_changed)
 
             if not valid_contracts:
+                # watchlist 非空卻一檔都解析不到，多半是 session 掛了。
+                # 這條路徑不會走到 snapshots，若不在這裡重登入就會永遠卡住，
+                # 所以一樣累積失敗、達門檻重登入把 session 救回來。
+                if watchlist:
+                    snap_fail += 1
+                    LOG.error("no contracts resolved (%d), watchlist=%s", snap_fail, watchlist)
+                    if snap_fail >= 3:
+                        relogin("contracts unresolved")
+                        snap_fail = 0
                 time.sleep(5)
                 continue
 

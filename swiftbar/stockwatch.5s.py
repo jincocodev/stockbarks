@@ -204,7 +204,7 @@ def png_sparkline(prices, prev_close, width=120, height=22, is_dark=False,
         if len(seg) < 2:
             continue
         color = RED_LINE if side == 'up' else GRN_LINE
-        draw.line([(x, y) for x, y, _ in seg], fill=color, width=1, joint="curve")
+        draw.line([(x, y) for x, y, _ in seg], fill=color, width=1 * SCALE, joint="curve")
 
     # 最後一點圓點
     lx, ly = pts[-1][0], pts[-1][1]

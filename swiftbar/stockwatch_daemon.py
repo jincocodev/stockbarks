@@ -104,10 +104,24 @@ def main():
 
     import shioaji as sj
     api = sj.Shioaji(simulation=False)
-    api.login(api_key=env["SINOPAC_API_KEY"], secret_key=env["SINOPAC_SECRET_KEY"])
-    LOG.info("shioaji logged in")
-
     contracts_cache = {}
+
+    def do_login():
+        api.login(api_key=env["SINOPAC_API_KEY"], secret_key=env["SINOPAC_SECRET_KEY"])
+        LOG.info("shioaji logged in")
+
+    def relogin(reason):
+        # session 壞掉或跨日時重建連線。重登入會重新載入 contracts，
+        # 順帶刷新昨收 / 漲跌停（跨日後這些值才不會是舊的）。
+        LOG.warning("re-login (%s)", reason)
+        try:
+            api.logout()
+        except Exception:
+            pass
+        contracts_cache.clear()
+        do_login()
+
+    do_login()
 
     def get_contract(code):
         if code in contracts_cache:
@@ -166,6 +180,8 @@ def main():
     if initial_wl:
         save_atomic(TICKS_PATH, ticks)
     backfilled_codes = set(initial_wl)
+    snap_fail = 0           # 連續 snapshot 失敗次數，達門檻就重登入
+    warned_unknown = set()  # 查不到的代號只警告一次
 
     try:
         while True:
@@ -187,6 +203,8 @@ def main():
             if ticks.get("_date") != tk:
                 ticks = {"_date": tk}
                 today_key = tk
+                relogin("new trading day")  # 刷新昨收 / 漲跌停
+                backfilled_codes.clear()    # 新的一天重新回補分時
 
             watchlist = state.get("watchlist", [])
             if not watchlist:
@@ -194,15 +212,40 @@ def main():
                 continue
 
             valid_contracts = []
+            names_changed = []  # daemon 已登入，順手把缺的中文名補進 state（helper 不必再登入）
             for code in watchlist:
                 c = get_contract(code)
-                if c is not None:
-                    valid_contracts.append((code, c))
-                    # 新加入 watchlist 的股票，回補今日分時
-                    if code not in backfilled_codes:
-                        n = backfill_today(code, c)
-                        LOG.info("backfilled (new) %s: %d bars", code, n)
-                        backfilled_codes.add(code)
+                if c is None:
+                    if code not in warned_unknown:
+                        LOG.warning("contract not found, skipping: %s", code)
+                        warned_unknown.add(code)
+                    continue
+                valid_contracts.append((code, c))
+                cn = getattr(c, "name", None)
+                if cn and state.get("names", {}).get(code, code) == code:
+                    names_changed.append((code, cn))
+                # 新加入 watchlist 的股票，回補今日分時
+                if code not in backfilled_codes:
+                    n = backfill_today(code, c)
+                    LOG.info("backfilled (new) %s: %d bars", code, n)
+                    backfilled_codes.add(code)
+
+            if names_changed:
+                # 重讀最新 state 再寫，降低和 helper 並寫時互蓋的機會
+                try:
+                    fresh = load_state()
+                except Exception:
+                    fresh = state
+                nm = fresh.setdefault("names", {})
+                for code, cn in names_changed:
+                    nm[code] = cn
+                save_atomic(STATE_PATH, fresh)
+                state = fresh
+                try:
+                    last_state_mtime = STATE_PATH.stat().st_mtime  # 避免下一圈又 reload
+                except Exception:
+                    pass
+                LOG.info("filled names: %s", names_changed)
 
             if not valid_contracts:
                 time.sleep(5)
@@ -210,8 +253,14 @@ def main():
 
             try:
                 snaps = api.snapshots([c for _, c in valid_contracts])
+                snap_fail = 0
             except Exception as e:
-                LOG.error("snapshots failed: %s", e)
+                snap_fail += 1
+                LOG.error("snapshots failed (%d): %s", snap_fail, e)
+                # session 斷了不會自己好，連續失敗就重登入把它救回來
+                if snap_fail >= 3:
+                    relogin("snapshots repeatedly failing")
+                    snap_fail = 0
                 time.sleep(5)
                 continue
 

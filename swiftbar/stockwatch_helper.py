@@ -14,7 +14,6 @@ from pathlib import Path
 
 BASE = Path.home() / ".hermes/swiftbar"
 STATE_PATH = BASE / "stockwatch_state.json"
-ENV_PATH = Path.home() / ".hermes/secrets/sinotrade.env"
 
 def load_state():
     return json.loads(STATE_PATH.read_text())
@@ -47,28 +46,6 @@ def ask_dialog(prompt):
     out = r.stdout.strip()
     return out or None
 
-def lookup_name(code):
-    """用 Shioaji 查股票中文簡稱。失敗回 code。"""
-    try:
-        env = {}
-        for line in ENV_PATH.read_text().splitlines():
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip()
-        import shioaji as sj
-        api = sj.Shioaji(simulation=False)
-        api.login(api_key=env["SINOPAC_API_KEY"], secret_key=env["SINOPAC_SECRET_KEY"])
-        try:
-            c = api.Contracts.Stocks.get(code)
-            if c is None:
-                return None
-            return c.name
-        finally:
-            api.logout()
-    except Exception as e:
-        print(f"lookup failed: {e}", file=sys.stderr)
-        return code
-
 def cmd_switch(code):
     s = load_state()
     if code in s.get("watchlist", []):
@@ -84,16 +61,15 @@ def cmd_add():
     if code in s.get("watchlist", []):
         notify(f"{code} 已在清單中")
         return
-    name = lookup_name(code)
-    if name is None:
-        notify(f"找不到代號 {code}")
-        return
+    # 不在這裡登入 Shioaji——daemon 已用同一組 key 登入，再登一次會把它的
+    # 行情 session 踢掉導致報價凍結。先用代號占位，daemon 會自動回填中文名
+    # （查不到的代號 daemon 會略過、log 警告，清單上顯示「—」）。
     s.setdefault("watchlist", []).append(code)
-    s.setdefault("names", {})[code] = name
+    s.setdefault("names", {})[code] = code
     if not s.get("current"):
         s["current"] = code
     save_state(s)
-    notify(f"已新增 {code} {name}")
+    notify(f"已新增 {code}（名稱載入中…）")
 
 def cmd_remove(code):
     s = load_state()
@@ -101,7 +77,7 @@ def cmd_remove(code):
     if code in wl:
         wl.remove(code)
         s["watchlist"] = wl
-        s.get("names", {}).pop(code, None)
+        s.setdefault("names", {}).pop(code, None)
         if s.get("current") == code:
             s["current"] = wl[0] if wl else None
         save_state(s)
